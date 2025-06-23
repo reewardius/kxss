@@ -217,7 +217,11 @@ func checkAppend(targetURL, param, suffix string) (bool, bool, error) {
 	}
 
 	bodyStr := string(b)
-	isError := strings.Contains(bodyStr, "SQL syntax") || resp.StatusCode >= 500
+	isError := strings.Contains(bodyStr, "SQL syntax") ||
+		strings.Contains(bodyStr, "PSQLException") || // PostgreSQL
+		strings.Contains(bodyStr, "ORA-") ||         // Oracle
+		strings.Contains(bodyStr, "SQLException") || // MSSQL
+		resp.StatusCode >= 500
 
 	if strings.HasPrefix(resp.Status, "3") {
 		return false, isError, nil
