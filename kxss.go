@@ -144,6 +144,21 @@ func main() {
 				Unfiltered:   output_of_url[2:],
 				SQLInjection: sqlInjection,
 			}
+			// Real-time output
+			if jsonOutput {
+				jsonData, err := json.MarshalIndent(result, "", "  ")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error marshaling JSON for %s: %s\n", c.url, err)
+				} else {
+					fmt.Fprintln(out, string(jsonData))
+				}
+			} else {
+				if result.SQLInjection {
+					fmt.Fprintf(out, "URL: %s Param: %s [Possible SQL Injection] Unfiltered: %v\n", result.URL, result.Param, result.Unfiltered)
+				} else {
+					fmt.Fprintf(out, "URL: %s Param: %s Unfiltered: %v\n", result.URL, result.Param, result.Unfiltered)
+				}
+			}
 			results = append(results, result)
 		}
 	})
@@ -159,21 +174,9 @@ func main() {
 	close(initialChecks)
 	<-done
 
-	if jsonOutput {
-		jsonData, err := json.MarshalIndent(results, "", "  ")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error marshaling JSON: %s\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintln(out, string(jsonData))
-	} else {
-		for _, result := range results {
-			if result.SQLInjection {
-				fmt.Fprintf(out, "URL: %s Param: %s [Possible SQL Injection] Unfiltered: %v \n", result.URL, result.Param, result.Unfiltered)
-			} else {
-				fmt.Fprintf(out, "URL: %s Param: %s Unfiltered: %v \n", result.URL, result.Param, result.Unfiltered)
-			}
-		}
+	// Optional: Print a message if no vulnerabilities were found
+	if len(results) == 0 {
+		fmt.Fprintln(out, "No vulnerabilities found.")
 	}
 }
 
@@ -188,7 +191,7 @@ func checkReflected(targetURL string) ([]string, error) {
 	}
 	defer resp.Body.Close()
 
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // Ограничение до 1MB
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // Limit to 1MB
 	if err != nil {
 		return out, err
 	}
@@ -227,7 +230,7 @@ func checkAppend(targetURL, param, suffix string) (bool, bool, error) {
 	qs.Set(param, val+suffix)
 	u.RawQuery = qs.Encode()
 
-	// Выполнить базовый запрос для сравнения
+	// Perform base request for comparison
 	baseResp, err := doRequestWithRetries("GET", targetURL, nil, 3)
 	if err != nil {
 		return false, false, err
@@ -238,7 +241,7 @@ func checkAppend(targetURL, param, suffix string) (bool, bool, error) {
 	defer baseResp.Body.Close()
 	baseStatusCode := baseResp.StatusCode
 
-	// Выполнить тестовый запрос с суффиксом
+	// Perform test request with suffix
 	resp, err := doRequestWithRetries("GET", u.String(), nil, 3)
 	if err != nil {
 		return false, false, err
@@ -263,7 +266,7 @@ func checkAppend(targetURL, param, suffix string) (bool, bool, error) {
 			}
 		}
 	}
-	// Проверяем, не является ли ошибка сервера ложной (если базовый запрос тоже возвращает 500)
+	// Check if server error is false positive (if base request also returns 500)
 	if resp.StatusCode >= 500 && baseStatusCode >= 500 {
 		isError = false
 	}
