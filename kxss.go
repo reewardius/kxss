@@ -3,9 +3,10 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,13 @@ import (
 type paramCheck struct {
 	url   string
 	param string
+}
+
+type Result struct {
+	URL          string   `json:"url"`
+	Param        string   `json:"param"`
+	Unfiltered   []string `json:"unfiltered"`
+	SQLInjection bool     `json:"sql_injection"`
 }
 
 var transport = &http.Transport{
@@ -33,13 +41,22 @@ var httpClient = &http.Client{
 	Transport: transport,
 }
 
+var dbErrorPatterns = map[string][]string{
+	"PostgreSQL": {"PSQLException", "ERROR:", "unterminated quoted string", "syntax error at or near"},
+	"Oracle":     {"ORA-", "PLS-", "ORA-00933", "ORA-01756"},
+	"MSSQL":      {"SQLException", "Incorrect syntax near", "Unclosed quotation mark"},
+	"Generic":    {"SQL syntax"},
+}
+
 func main() {
 	var inputFile string
 	var outputFile string
 	var numWorkers int
+	var jsonOutput bool
 	flag.StringVar(&inputFile, "f", "", "file containing URLs to process")
 	flag.StringVar(&outputFile, "o", "", "file to write output to")
 	flag.IntVar(&numWorkers, "w", 40, "number of worker goroutines")
+	flag.BoolVar(&jsonOutput, "j", false, "output results in JSON format")
 	flag.Parse()
 
 	if numWorkers < 1 {
@@ -77,6 +94,7 @@ func main() {
 		out = os.Stdout
 	}
 
+	results := []Result{}
 	initialChecks := make(chan paramCheck, numWorkers)
 
 	appendChecks := makePool(initialChecks, numWorkers, func(c paramCheck, output chan paramCheck) {
@@ -120,11 +138,13 @@ func main() {
 			}
 		}
 		if len(output_of_url) > 2 || sqlInjection {
-			if sqlInjection {
-				fmt.Fprintf(out, "URL: %s Param: %s [Possible SQL Injection] Unfiltered: %v \n", output_of_url[0], output_of_url[1], output_of_url[2:])
-			} else {
-				fmt.Fprintf(out, "URL: %s Param: %s Unfiltered: %v \n", output_of_url[0], output_of_url[1], output_of_url[2:])
+			result := Result{
+				URL:          output_of_url[0],
+				Param:        output_of_url[1],
+				Unfiltered:   output_of_url[2:],
+				SQLInjection: sqlInjection,
 			}
+			results = append(results, result)
 		}
 	})
 
@@ -138,26 +158,37 @@ func main() {
 
 	close(initialChecks)
 	<-done
+
+	if jsonOutput {
+		jsonData, err := json.MarshalIndent(results, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error marshaling JSON: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintln(out, string(jsonData))
+	} else {
+		for _, result := range results {
+			if result.SQLInjection {
+				fmt.Fprintf(out, "URL: %s Param: %s [Possible SQL Injection] Unfiltered: %v \n", result.URL, result.Param, result.Unfiltered)
+			} else {
+				fmt.Fprintf(out, "URL: %s Param: %s Unfiltered: %v \n", result.URL, result.Param, result.Unfiltered)
+			}
+		}
+	}
 }
 
 func checkReflected(targetURL string) ([]string, error) {
 	out := make([]string, 0)
-	req, err := http.NewRequest("GET", targetURL, nil)
-	if err != nil {
-		return out, err
-	}
-	req.Header.Add("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.100 Safari/537.36")
-
-	resp, err := httpClient.Do(req)
+	resp, err := doRequestWithRetries("GET", targetURL, nil, 3)
 	if err != nil {
 		return out, err
 	}
 	if resp.Body == nil {
-		return out, err
+		return out, fmt.Errorf("nil response body")
 	}
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // Ограничение до 1MB
 	if err != nil {
 		return out, err
 	}
@@ -196,32 +227,46 @@ func checkAppend(targetURL, param, suffix string) (bool, bool, error) {
 	qs.Set(param, val+suffix)
 	u.RawQuery = qs.Encode()
 
-	req, err := http.NewRequest("GET", u.String(), nil)
+	// Выполнить базовый запрос для сравнения
+	baseResp, err := doRequestWithRetries("GET", targetURL, nil, 3)
 	if err != nil {
 		return false, false, err
 	}
-	req.Header.Add("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.100 Safari/537.36")
+	if baseResp.Body == nil {
+		return false, false, fmt.Errorf("nil base response body")
+	}
+	defer baseResp.Body.Close()
+	baseStatusCode := baseResp.StatusCode
 
-	resp, err := httpClient.Do(req)
+	// Выполнить тестовый запрос с суффиксом
+	resp, err := doRequestWithRetries("GET", u.String(), nil, 3)
 	if err != nil {
 		return false, false, err
 	}
 	if resp.Body == nil {
-		return false, false, err
+		return false, false, fmt.Errorf("nil response body")
 	}
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
 	if err != nil {
 		return false, false, err
 	}
 
 	bodyStr := string(b)
-	isError := strings.Contains(bodyStr, "SQL syntax") ||
-		strings.Contains(bodyStr, "PSQLException") || // PostgreSQL
-		strings.Contains(bodyStr, "ORA-") ||         // Oracle
-		strings.Contains(bodyStr, "SQLException") || // MSSQL
-		resp.StatusCode >= 500
+	isError := false
+	for _, patterns := range dbErrorPatterns {
+		for _, pattern := range patterns {
+			if strings.Contains(bodyStr, pattern) {
+				isError = true
+				break
+			}
+		}
+	}
+	// Проверяем, не является ли ошибка сервера ложной (если базовый запрос тоже возвращает 500)
+	if resp.StatusCode >= 500 && baseStatusCode >= 500 {
+		isError = false
+	}
 
 	if strings.HasPrefix(resp.Status, "3") {
 		return false, isError, nil
@@ -236,6 +281,25 @@ func checkAppend(targetURL, param, suffix string) (bool, bool, error) {
 	}
 
 	return false, isError, nil
+}
+
+func doRequestWithRetries(method, urlStr string, body io.Reader, maxRetries int) (*http.Response, error) {
+	var resp *http.Response
+	var err error
+	for retries := 0; retries < maxRetries; retries++ {
+		req, err := http.NewRequest(method, urlStr, body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Add("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.100 Safari/537.36")
+
+		resp, err = httpClient.Do(req)
+		if err == nil && resp != nil {
+			return resp, nil
+		}
+		time.Sleep(time.Second * time.Duration(retries+1))
+	}
+	return nil, fmt.Errorf("failed after %d retries: %v", maxRetries, err)
 }
 
 type workerFunc func(paramCheck, chan paramCheck)
