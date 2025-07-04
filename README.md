@@ -31,7 +31,7 @@ Run `kxss` on the output file:
 ```
 Alternatively, pipe `katana` output directly:
 ```
-katana -u vulnweb.com -ps -f qurl | ./kxss
+katana -u vulnweb.com -ps -f qurl | uro | ./kxss
 
 URL: http://testphp.vulnweb.com/hpp/?pp= Param: pp Unfiltered: [" ' < > $ | ( ) ` : ; { }]
 URL: http://testphp.vulnweb.com/hpp/params.php?p= Param: p Unfiltered: [" ' < > $ | ( ) ` : ; { }]
