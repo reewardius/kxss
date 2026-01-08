@@ -6,34 +6,56 @@ go mod init kxss.go && go mod tidy && go build -o kxss
 ```
 #### Usage
 ```
-./kxss -h
+Usage: ./kxss [options]
 
-Usage of ./kxss:
-  -f string      file containing URLs to process
-  -j output      results in JSON format
-  -o string      file to write output to
-  -w int         number of worker goroutines (default 40)
-```
-#### Workflow with Katana
-`kxss` integrates well with `katana`, a web crawler for discovering URLs. 
+Input Options:
+  -f string
+        file containing URLs to process (default: stdin)
 
-Passive or active crawl a target domain with `katana` to extract URLs with query parameters:
-```
-katana -u vulnweb.com -ps -f qurl -o katana_passive_crawl.txt && uro -i katana_passive_crawl.txt -o katana_passive.txt
+Output Options:
+  -o string
+        file to write output to (default: stdout)
+  -j    output results in JSON format
 
-katana -u http://testphp.vulnweb.com -f qurl -o katana_active_crawl.txt && uro -i katana_active_crawl.txt -o katana_active.txt
-```
-Run `kxss` on the output file:
-```
-./kxss -f katana_passive.txt
+Performance Options:
+  -w int
+        number of worker goroutines (default: 40)
 
-./kxss -f katana_active.txt -o reflected_parameters.txt && awk '/^URL:/ {print $2}' reflected_parameters.txt
-```
-Alternatively, pipe `katana` output directly:
-```
-katana -u vulnweb.com -ps -f qurl | uro | ./kxss
+Filtering Options:
+  -whitelist string
+        comma-separated whitelist of extensions (e.g., "php,asp,jsp")
+  -blacklist string
+        comma-separated blacklist of extensions (e.g., "jpg,png,css")
+  -filters string
+        comma-separated filters:
+          hasparams  - only URLs with query parameters
+          noparams   - only URLs without query parameters
+          hasext     - only URLs with file extensions
+          noext      - only URLs without extensions
+          allexts    - don't filter any extensions
+          keepcontent - keep blog posts and articles
+          keepslash  - don't remove trailing slashes
 
-URL: http://testphp.vulnweb.com/hpp/?pp= Param: pp Unfiltered: [" ' < > $ | ( ) ` : ; { }]
-URL: http://testphp.vulnweb.com/hpp/params.php?p= Param: p Unfiltered: [" ' < > $ | ( ) ` : ; { }]
-URL: http://testphp.vulnweb.com/product.php?pic=6 Param: pic [Possible SQL Injection] Unfiltered: [" ' < > $ | ( ) ` : ; { }]
+Examples:
+  ./kxss -f urls.txt
+  ./kxss -f urls.txt -w 100 -o results.txt
+  ./kxss -f urls.txt -j -o results.json
+  ./kxss -f urls.txt -whitelist php -filters hasparams
+  ./kxss -f urls.txt -blacklist jpg,png,gif
+  cat urls.txt | ./kxss
+```
+
+#### Katana Workflow
+```
+# Full active workflow
+katana -u https://vulnweb.com -o urls.txt && \
+  ./kxss -f urls.txt -filters hasparams -w 100 -j -o results.json
+
+# Full passive workflow
+katana -u vulnweb.com -ps -f qurl > katana.txt && \
+  ./kxss -f katana.txt -whitelist php -filters hasparams
+
+URL: http://testphp.vulnweb.com/products.php?id= Param: id [Possible SQL Injection] [MSSQL] Unfiltered: []
+URL: http://testphp.vulnweb.com/artists.php?artist=3 Param: artist [Possible SQL Injection] [MySQL] Unfiltered: [" ' < > $ | ( ) ` : ; { }]
+URL: http://testphp.vulnweb.com/hpp/params.php?p=/ Param: p Unfiltered: [" ' < > $ | ( ) ` : ; { }]
 ```
